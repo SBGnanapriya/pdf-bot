@@ -43,7 +43,7 @@ if uploaded_file is not None:
     if query:
         # Search for relevant chunks
         docs_with_scores = vectorstore.similarity_search_with_score(query, k=5)
-        THRESHOLD = 0.7  # strict similarity
+        THRESHOLD = 1.0  # strict similarity
         relevant_docs = [doc for doc, score in docs_with_scores if score < THRESHOLD]
 
         if not relevant_docs:
