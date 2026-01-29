@@ -21,7 +21,16 @@ if not uploaded_file:
 # 2️⃣ Load PDF
 # -------------------------------
 try:
-    loader = PyPDFLoader(uploaded_file)
+    import tempfile
+
+# Save the uploaded file to a temporary location
+    with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp_file:
+     tmp_file.write(uploaded_file.read())
+     tmp_pdf_path = tmp_file.name
+
+# Now load PDF using PyPDFLoader with file path
+    loader = PyPDFLoader(tmp_pdf_path)
+
     documents = loader.load()
     st.success(f"✅ PDF loaded successfully! Total pages: {len(documents)}")
 except Exception as e:
