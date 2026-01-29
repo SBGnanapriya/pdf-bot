@@ -1,102 +1,110 @@
 import streamlit as st
 from pypdf import PdfReader
+from transformers import pipeline
+from sentence_transformers import SentenceTransformer, util
 import torch
-from transformers import AutoTokenizer, AutoModelForSeq2SeqLM
 
-# ---------------- PAGE CONFIG ----------------
-st.set_page_config(page_title="PDF QA Bot (Open Source LLM)", layout="wide")
-st.title("📄 PDF Question Answering Bot (Hugging Face LLM)")
+# -------------------------------
+# PAGE CONFIG
+# -------------------------------
+st.set_page_config(page_title="PDF Q&A Bot", layout="wide")
+st.title("📄 PDF Question Answering Bot (Open Source LLM)")
 
-# ---------------- LOAD MODEL ----------------
+# -------------------------------
+# LOAD MODELS (Cached)
+# -------------------------------
 @st.cache_resource
-def load_model():
-    model_name = "google/flan-t5-large"  # open-source, good explanations
-    tokenizer = AutoTokenizer.from_pretrained(model_name)
-    model = AutoModelForSeq2SeqLM.from_pretrained(model_name)
-    return tokenizer, model
+def load_models():
+    embedder = SentenceTransformer("all-MiniLM-L6-v2")
 
-tokenizer, model = load_model()
+    llm = pipeline(
+        "text2text-generation",
+        model="google/flan-t5-base",
+        max_length=512
+    )
+    return embedder, llm
 
-# ---------------- PDF TEXT EXTRACTION ----------------
+embedder, llm = load_models()
+
+# -------------------------------
+# PDF TEXT EXTRACTION
+# -------------------------------
 def extract_text_from_pdf(uploaded_file):
-    text = ""
     reader = PdfReader(uploaded_file)
+    text = ""
     for page in reader.pages:
         if page.extract_text():
             text += page.extract_text() + "\n"
     return text
 
-# ---------------- KEYWORD MATCHING ----------------
-def find_relevant_text(question, pdf_text):
-    keywords = question.lower().split()
-    matched_lines = []
+# -------------------------------
+# TEXT CHUNKING
+# -------------------------------
+def chunk_text(text, chunk_size=400):
+    words = text.split()
+    chunks = []
+    for i in range(0, len(words), chunk_size):
+        chunk = " ".join(words[i:i + chunk_size])
+        chunks.append(chunk)
+    return chunks
 
-    for line in pdf_text.split("\n"):
-        if any(word in line.lower() for word in keywords):
-            matched_lines.append(line)
+# -------------------------------
+# FIND MOST RELEVANT CHUNK
+# -------------------------------
+def get_best_chunk(question, chunks):
+    question_embedding = embedder.encode(question, convert_to_tensor=True)
+    chunk_embeddings = embedder.encode(chunks, convert_to_tensor=True)
 
-    return "\n".join(matched_lines)
+    similarities = util.cos_sim(question_embedding, chunk_embeddings)[0]
+    best_idx = torch.argmax(similarities).item()
 
-# ---------------- ANSWER GENERATION ----------------
-def generate_answer(question, matched_text, full_text):
-    if matched_text.strip():
-        prompt = f"""
-Answer the question using the context below.
-Explain clearly in at least 10 lines.
+    return chunks[best_idx], similarities[best_idx].item()
+
+# -------------------------------
+# GENERATE ANSWER
+# -------------------------------
+def generate_answer(context, question):
+    prompt = f"""
+You are a helpful teacher.
+Answer the question clearly and in detail (at least 10 lines).
 
 Context:
-{matched_text}
-
-Question:
-{question}
-"""
-    else:
-        # fallback for overview / general questions
-        prompt = f"""
-The user asked a general or high-level question.
-Use the document below to answer.
-
-Document:
-{full_text[:3000]}
+{context}
 
 Question:
 {question}
 
-Instructions:
-- Explain in at least 10 lines
-- Simple, student-friendly explanation
+Answer:
 """
+    response = llm(prompt)[0]["generated_text"]
+    return response
 
-    inputs = tokenizer(
-        prompt,
-        return_tensors="pt",
-        truncation=True,
-        max_length=512
-    )
+# -------------------------------
+# UI
+# -------------------------------
+uploaded_file = st.file_uploader("Upload a PDF", type="pdf")
 
-    with torch.no_grad():
-        outputs = model.generate(
-            **inputs,
-            max_new_tokens=350,
-            temperature=0.3,
-            do_sample=False
-        )
+if uploaded_file:
+    text = extract_text_from_pdf(uploaded_file)
+    chunks = chunk_text(text)
 
-    return tokenizer.decode(outputs[0], skip_special_tokens=True)
+    st.success("PDF processed successfully!")
 
-# ---------------- UI ----------------
-uploaded_pdf = st.file_uploader("Upload a PDF file", type="pdf")
+    question = st.text_input("Ask a question from the PDF")
 
-if uploaded_pdf:
-    pdf_text = extract_text_from_pdf(uploaded_pdf)
-    st.success("PDF uploaded and processed successfully!")
+    if question:
+        best_chunk, score = get_best_chunk(question, chunks)
 
-    question = st.text_input("Ask a question about the PDF")
+        if score < 0.25:
+            st.warning("Answer not directly found in PDF. Giving a general explanation.")
+            context = text[:1500]  # fallback: general overview
+        else:
+            context = best_chunk
 
-    if st.button("Get Answer") and question.strip():
-        with st.spinner("Thinking... 🤔"):
-            matched_text = find_relevant_text(question, pdf_text)
-            answer = generate_answer(question, matched_text, pdf_text)
+        answer = generate_answer(context, question)
 
-        st.subheader("Answer:")
+        st.subheader("📘 Answer")
         st.write(answer)
+
+        with st.expander("🔍 Used Context"):
+            st.write(context)
