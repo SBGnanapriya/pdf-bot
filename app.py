@@ -1,30 +1,30 @@
 # app.py
 import streamlit as st
 from langchain_community.document_loaders import PyPDFLoader
-from langchain_text_splitters import RecursiveCharacterTextSplitter
-from langchain_community.embeddings import HuggingFaceEmbeddings
-from langchain_community.vectorstores import FAISS
+from langchain.text_splitter import RecursiveCharacterTextSplitter
+from langchain.vectorstores import FAISS
+from langchain.embeddings import HuggingFaceEmbeddings
 from transformers import pipeline
-import os
-
-st.set_page_config(page_title="PDF QA Bot", layout="wide")
-st.title("📄 PDF Question Answering Bot")
-
-# -----------------------------
-# 1️⃣ Upload PDF
-# -----------------------------
 import tempfile
 
+st.set_page_config(page_title="PDF Q&A Bot", page_icon="📄")
+
+st.title("📄 PDF Q&A Bot")
+st.write("Upload a PDF and ask any question. The bot will answer in detail or say 'Answer not found' if it's not in the PDF.")
+
+# -------------------------------
+# Step 1: Upload PDF
+# -------------------------------
 uploaded_file = st.file_uploader("Upload a PDF", type="pdf")
 
 if uploaded_file:
     # Save uploaded PDF to a temporary file
     with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp_file:
         tmp_file.write(uploaded_file.read())
-        tmp_file_path = tmp_file.name  # <-- this is a valid file path
+        pdf_path = tmp_file.name
 
     try:
-        loader = PyPDFLoader(tmp_file_path)
+        loader = PyPDFLoader(pdf_path)
         documents = loader.load()
         st.success(f"✅ PDF loaded successfully! Total pages: {len(documents)}")
     except Exception as e:
@@ -34,63 +34,59 @@ else:
     st.info("Please upload a PDF to continue.")
     st.stop()
 
-
-# -----------------------------
-# 2️⃣ Split PDF into chunks
-# -----------------------------
-text_splitter = RecursiveCharacterTextSplitter(chunk_size=500, chunk_overlap=50)
+# -------------------------------
+# Step 2: Split PDF into chunks
+# -------------------------------
+text_splitter = RecursiveCharacterTextSplitter(
+    chunk_size=1000,
+    chunk_overlap=100
+)
 chunks = text_splitter.split_documents(documents)
-st.write(f"Total chunks created: {len(chunks)}")
+st.info(f"Total chunks created: {len(chunks)}")
 
-# -----------------------------
-# 3️⃣ Load Embeddings and LLM
-# -----------------------------
-@st.cache_resource(show_spinner=True)
-def load_models():
-    try:
-        embedder = HuggingFaceEmbeddings(model_name="sentence-transformers/all-MiniLM-L6-v2")
-        llm = pipeline(
-            task="text-generation",  # changed to compatible open-source task
-            model="google/flan-t5-base",
-            max_length=512
-        )
-        return embedder, llm
-    except Exception as e:
-        st.error(f"❌ Failed to load LLM: {e}")
-        st.stop()
+# -------------------------------
+# Step 3: Create embeddings & FAISS index
+# -------------------------------
+with st.spinner("Creating embeddings..."):
+    embeddings = HuggingFaceEmbeddings(model_name="sentence-transformers/all-MiniLM-L6-v2")
+    vectorstore = FAISS.from_documents(chunks, embeddings)
+st.success("✅ Embeddings created and stored in FAISS!")
 
-embedder, llm = load_models()
-st.success("✅ Models loaded successfully!")
+# -------------------------------
+# Step 4: Load LLM
+# -------------------------------
+with st.spinner("Loading language model..."):
+    llm = pipeline(
+        "text2text-generation",
+        model="google/flan-t5-large",
+        device=0 if st.runtime.exists("gpu") else -1
+    )
+st.success("✅ LLM loaded successfully!")
 
-# -----------------------------
-# 4️⃣ Create FAISS vector store
-# -----------------------------
-vectorstore = FAISS.from_documents(chunks, embedder)
-
-# -----------------------------
-# 5️⃣ Ask user for a question
-# -----------------------------
+# -------------------------------
+# Step 5: Ask question
+# -------------------------------
 query = st.text_input("Ask a question from the PDF:")
 
 if query:
-    # Step 1: Semantic Search
+    # -------------------------------
+    # Step 6: Semantic search
+    # -------------------------------
     docs_with_scores = vectorstore.similarity_search_with_score(query, k=5)
-    THRESHOLD = 0.8
+    THRESHOLD = 0.9  # High threshold: only pick very relevant chunks
     relevant_docs = [doc for doc, score in docs_with_scores if score < THRESHOLD]
 
-    # Step 2: Prepare context for LLM
-    if relevant_docs:
-        context = "\n".join([doc.page_content for doc in relevant_docs])
-        st.write("✅ Relevant context found via semantic search.")
+    if not relevant_docs:
+        st.warning("❌ Answer not found in the PDF.")
     else:
-        # Fallback: use the **whole PDF**
-        context = "\n".join([doc.page_content for doc in chunks])
-        st.write("⚠️ No specific match found. Using full PDF for answering...")
+        context = "\n".join([doc.page_content for doc in relevant_docs])
 
-    # Step 3: Generate answer using LLM
-    prompt = f"""
-Answer the question below using ONLY the context provided.
-If the answer is not in the context, say "Answer not found".
+        # -------------------------------
+        # Step 7: Generate answer
+        # -------------------------------
+        prompt = f"""
+Answer the question using ONLY the context below.
+If the answer is not present in the context, say 'Answer not found'.
 
 Context:
 {context}
@@ -98,13 +94,11 @@ Context:
 Question:
 {query}
 
-Provide a detailed explanation (at least 10 lines if possible).
+Answer in detail, at least 10 lines:
 """
+        with st.spinner("Generating answer..."):
+            output = llm(prompt, max_length=1000, do_sample=True)
+            answer = output[0]["generated_text"]
 
-    try:
-        response = llm(prompt)
-        answer = response[0]["generated_text"] if isinstance(response, list) else response
         st.subheader("Answer:")
         st.write(answer)
-    except Exception as e:
-        st.error(f"❌ Failed to generate answer: {e}")
