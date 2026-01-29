@@ -20,11 +20,10 @@ tokenizer, model = load_model()
 # ---------------- PDF TEXT EXTRACTION ----------------
 def extract_text_from_pdf(uploaded_file):
     text = ""
-    reader = PyPDF2.PdfReader(uploaded_file)
+    reader = PdfReader(uploaded_file)
     for page in reader.pages:
-        extracted = page.extract_text()
-        if extracted:
-            text += extracted + "\n"
+        if page.extract_text():
+            text += page.extract_text() + "\n"
     return text
 
 # ---------------- KEYWORD MATCHING ----------------
