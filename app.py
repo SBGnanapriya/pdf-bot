@@ -59,7 +59,7 @@ with st.spinner("Loading language model..."):
     llm = pipeline(
         "text2text-generation",
         model="google/flan-t5-large",
-        device=0 if st.runtime.exists("gpu") else -1
+        device=-1
     )
 st.success("✅ LLM loaded successfully!")
 
