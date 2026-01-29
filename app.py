@@ -9,42 +9,37 @@ from langchain.chains import RetrievalQA
 
 from transformers import pipeline
 
-# ------------------ Streamlit UI ------------------
-st.set_page_config(page_title="PDF Question Answer Bot", layout="centered")
-st.title("📄 PDF Question Answer Bot")
+# ---------------- UI ----------------
+st.set_page_config(page_title="PDF QA Bot")
+st.title("📄 PDF Question Answering Bot")
 
-st.write("Upload a PDF and ask **any question** based ONLY on its content.")
+uploaded_file = st.file_uploader("Upload a PDF", type="pdf")
 
-uploaded_file = st.file_uploader("Upload PDF", type="pdf")
-
-# ------------------ PDF Processing ------------------
-def load_pdf_text(pdf_file):
-    reader = PdfReader(pdf_file)
+# ---------------- PDF Loader ----------------
+def read_pdf(pdf):
+    reader = PdfReader(pdf)
     text = ""
     for page in reader.pages:
-        if page.extract_text():
-            text += page.extract_text()
+        content = page.extract_text()
+        if content:
+            text += content
     return text
 
 
 @st.cache_resource
-def build_qa_chain(pdf_text):
-    # Split text
+def build_chain(text):
     splitter = RecursiveCharacterTextSplitter(
         chunk_size=1000,
         chunk_overlap=200
     )
-    chunks = splitter.split_text(pdf_text)
+    chunks = splitter.split_text(text)
 
-    # Embeddings
     embeddings = HuggingFaceEmbeddings(
         model_name="sentence-transformers/all-MiniLM-L6-v2"
     )
 
-    # Vector DB
     vectorstore = FAISS.from_texts(chunks, embeddings)
 
-    # LLM
     hf_pipeline = pipeline(
         "text2text-generation",
         model="google/flan-t5-base",
@@ -53,28 +48,27 @@ def build_qa_chain(pdf_text):
 
     llm = HuggingFacePipeline(pipeline=hf_pipeline)
 
-    # QA Chain
-    qa_chain = RetrievalQA.from_chain_type(
+    qa = RetrievalQA.from_chain_type(
         llm=llm,
         retriever=vectorstore.as_retriever(search_kwargs={"k": 4}),
         return_source_documents=True
     )
 
-    return qa_chain
+    return qa
 
 
-# ------------------ Main Logic ------------------
+# ---------------- MAIN ----------------
 if uploaded_file:
     with st.spinner("Reading PDF..."):
-        pdf_text = load_pdf_text(uploaded_file)
+        pdf_text = read_pdf(uploaded_file)
 
-    if len(pdf_text.strip()) == 0:
-        st.error("❌ Could not extract text from this PDF.")
+    if not pdf_text.strip():
+        st.error("❌ No readable text found in PDF")
     else:
-        qa_chain = build_qa_chain(pdf_text)
-        st.success("✅ PDF loaded successfully!")
+        qa_chain = build_chain(pdf_text)
+        st.success("✅ PDF loaded successfully")
 
-        question = st.text_input("Ask your question:")
+        question = st.text_input("Ask any question from the PDF")
 
         if question:
             with st.spinner("Searching document..."):
@@ -82,14 +76,8 @@ if uploaded_file:
 
             answer = result["result"].strip()
 
-            # Strict NOT FOUND logic
-            if (
-                len(answer) < 15
-                or "not found" in answer.lower()
-                or "no information" in answer.lower()
-            ):
-                st.warning("❌ Answer not found in the document.")
+            if len(answer) < 20:
+                st.warning("❌ Answer not found in the document")
             else:
-                st.subheader("📌 Answer (max 10 lines)")
-                lines = answer.split("\n")[:10]
-                st.write("\n".join(lines))
+                st.subheader("Answer (max 10 lines)")
+                st.write("\n".join(answer.split("\n")[:10]))
