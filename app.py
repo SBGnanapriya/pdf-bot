@@ -63,8 +63,11 @@ def find_context(question, chunks):
 # ---------------------------------
 def generate_answer(context, question):
     prompt = f"""
-You are an expert teacher.
-Explain clearly in at least 10 lines.
+You are a knowledgeable teacher.
+
+Answer the question in a detailed and explanatory manner.
+Write at least 10–12 lines.
+Use full sentences and examples if possible.
 
 Context:
 {context}
@@ -72,14 +75,24 @@ Context:
 Question:
 {question}
 
-Answer:
+Detailed Answer:
 """
 
-    inputs = tokenizer(prompt, return_tensors="pt", truncation=True)
+    inputs = tokenizer(
+        prompt,
+        return_tensors="pt",
+        truncation=True,
+        max_length=512
+    )
+
     outputs = model.generate(
         **inputs,
         max_length=512,
-        temperature=0.7
+        min_length=150,        # 🔑 forces length
+        do_sample=True,        # 🔑 enables creativity
+        temperature=0.8,
+        top_p=0.9,
+        repetition_penalty=1.2
     )
 
     return tokenizer.decode(outputs[0], skip_special_tokens=True)
