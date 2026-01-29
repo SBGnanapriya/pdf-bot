@@ -13,11 +13,18 @@ st.title("📄 PDF Question Answering Bot")
 # -----------------------------
 # 1️⃣ Upload PDF
 # -----------------------------
+import tempfile
+
 uploaded_file = st.file_uploader("Upload a PDF", type="pdf")
 
 if uploaded_file:
+    # Save uploaded PDF to a temporary file
+    with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp_file:
+        tmp_file.write(uploaded_file.read())
+        tmp_file_path = tmp_file.name  # <-- this is a valid file path
+
     try:
-        loader = PyPDFLoader(uploaded_file)
+        loader = PyPDFLoader(tmp_file_path)
         documents = loader.load()
         st.success(f"✅ PDF loaded successfully! Total pages: {len(documents)}")
     except Exception as e:
@@ -26,6 +33,7 @@ if uploaded_file:
 else:
     st.info("Please upload a PDF to continue.")
     st.stop()
+
 
 # -----------------------------
 # 2️⃣ Split PDF into chunks
