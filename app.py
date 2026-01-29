@@ -15,11 +15,20 @@ st.write("Upload a PDF and ask any question. The bot will try to answer using th
 
 uploaded_file = st.file_uploader("Upload PDF", type="pdf")
 
-if uploaded_file:
+
     # ------------------------------
     # 2️⃣ Load PDF
     # ------------------------------
-    loader = PyPDFLoader(uploaded_file)
+import tempfile
+
+if uploaded_file:
+    # Save uploaded file to a temporary file
+    with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp_file:
+        tmp_file.write(uploaded_file.read())
+        tmp_file_path = tmp_file.name
+
+    # Load PDF using file path
+    loader = PyPDFLoader(tmp_file_path)
     documents = loader.load()
     st.success(f"PDF loaded successfully! Total pages: {len(documents)}")
 
