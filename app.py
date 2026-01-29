@@ -11,14 +11,14 @@ from transformers import AutoTokenizer, AutoModelForSeq2SeqLM
 
 
 # ----------------------------
-# Streamlit page config
+# Page config
 # ----------------------------
 st.set_page_config(page_title="PDF QA Bot", layout="wide")
 st.title("📄 PDF Question Answering Bot (Open-Source LLM)")
 
 
 # ----------------------------
-# Load models safely
+# Load models
 # ----------------------------
 @st.cache_resource
 def load_models():
@@ -36,7 +36,7 @@ embedder, tokenizer, model = load_models()
 
 
 # ----------------------------
-# File upload
+# Upload PDF
 # ----------------------------
 uploaded_file = st.file_uploader("Upload a PDF", type="pdf")
 
@@ -48,51 +48,41 @@ if uploaded_file:
     loader = PyPDFLoader(pdf_path)
     documents = loader.load()
 
-    st.success(f"PDF loaded successfully! Pages: {len(documents)}")
+    st.success(f"PDF loaded successfully ({len(documents)} pages)")
+
 
     # ----------------------------
     # Split PDF
     # ----------------------------
     splitter = RecursiveCharacterTextSplitter(
-        chunk_size=500,
-        chunk_overlap=50
+        chunk_size=800,
+        chunk_overlap=100
     )
     chunks = splitter.split_documents(documents)
 
     vectorstore = FAISS.from_documents(chunks, embedder)
-    st.success("Embeddings created!")
+    st.success("Vector store created!")
 
 
     # ----------------------------
-    # Question input
+    # Question
     # ----------------------------
-    query = st.text_input("Ask a question from the PDF")
+    query = st.text_input("Ask a question (e.g. overview, explain inheritance, what is object)")
 
     if query:
-        docs_with_scores = vectorstore.similarity_search_with_score(query, k=5)
+        # Always retrieve top chunks
+        docs = vectorstore.similarity_search(query, k=5)
 
-        THRESHOLD = 0.6
-        query_words = set(query.lower().split())
-        relevant_docs = []
+        context = "\n\n".join(doc.page_content for doc in docs)
 
-        for doc, score in docs_with_scores:
-            content = doc.page_content.lower()
-            overlap = query_words.intersection(content.split())
-            if score < THRESHOLD and len(overlap) >= 1:
-                relevant_docs.append(doc)
+        prompt = f"""
+You are a helpful assistant answering questions ONLY from the given context.
 
-        if not relevant_docs:
-            st.error("❌ Answer not found in the PDF.")
-        else:
-            context = "\n".join(doc.page_content for doc in relevant_docs)
-
-            if len(context) < 200:
-                st.warning("⚠️ Context too weak to answer reliably.")
-            else:
-                prompt = f"""
-Answer the question using ONLY the context below.
-Explain clearly in 8–12 lines.
-If the answer is not present, say "Answer not found".
+Rules:
+- If the question asks for an overview or summary, summarize the document.
+- If the answer is not present in the context, say exactly: "Answer not found in the document."
+- Explain clearly in 10–12 lines.
+- Do NOT add outside knowledge.
 
 Context:
 {context}
@@ -103,15 +93,16 @@ Question:
 Answer:
 """
 
-                inputs = tokenizer(prompt, return_tensors="pt", truncation=True)
+        inputs = tokenizer(prompt, return_tensors="pt", truncation=True)
 
-                with torch.no_grad():
-                    outputs = model.generate(
-                        **inputs,
-                        max_new_tokens=300
-                    )
+        with torch.no_grad():
+            outputs = model.generate(
+                **inputs,
+                max_new_tokens=350,
+                temperature=0.3
+            )
 
-                answer = tokenizer.decode(outputs[0], skip_special_tokens=True)
+        answer = tokenizer.decode(outputs[0], skip_special_tokens=True)
 
-                st.subheader("✅ Answer")
-                st.write(answer)
+        st.subheader("✅ Answer")
+        st.write(answer)
