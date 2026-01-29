@@ -1,104 +1,95 @@
-# app.py
 import streamlit as st
-from langchain_community.document_loaders import PyPDFLoader
+from pypdf import PdfReader
+
 from langchain.text_splitters import RecursiveCharacterTextSplitter
-from langchain.vectorstores import FAISS
-from langchain.embeddings import HuggingFaceEmbeddings
+from langchain_community.embeddings import HuggingFaceEmbeddings
+from langchain_community.vectorstores import FAISS
+from langchain_community.llms import HuggingFacePipeline
+from langchain.chains import RetrievalQA
+
 from transformers import pipeline
-import tempfile
 
-st.set_page_config(page_title="PDF Q&A Bot", page_icon="📄")
+# ------------------ Streamlit UI ------------------
+st.set_page_config(page_title="PDF Question Answer Bot", layout="centered")
+st.title("📄 PDF Question Answer Bot")
 
-st.title("📄 PDF Q&A Bot")
-st.write("Upload a PDF and ask any question. The bot will answer in detail or say 'Answer not found' if it's not in the PDF.")
+st.write("Upload a PDF and ask **any question** based ONLY on its content.")
 
-# -------------------------------
-# Step 1: Upload PDF
-# -------------------------------
-uploaded_file = st.file_uploader("Upload a PDF", type="pdf")
+uploaded_file = st.file_uploader("Upload PDF", type="pdf")
 
-if uploaded_file:
-    # Save uploaded PDF to a temporary file
-    with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp_file:
-        tmp_file.write(uploaded_file.read())
-        pdf_path = tmp_file.name
+# ------------------ PDF Processing ------------------
+def load_pdf_text(pdf_file):
+    reader = PdfReader(pdf_file)
+    text = ""
+    for page in reader.pages:
+        if page.extract_text():
+            text += page.extract_text()
+    return text
 
-    try:
-        loader = PyPDFLoader(pdf_path)
-        documents = loader.load()
-        st.success(f"✅ PDF loaded successfully! Total pages: {len(documents)}")
-    except Exception as e:
-        st.error(f"❌ Failed to load PDF: {e}")
-        st.stop()
-else:
-    st.info("Please upload a PDF to continue.")
-    st.stop()
 
-# -------------------------------
-# Step 2: Split PDF into chunks
-# -------------------------------
-text_splitter = RecursiveCharacterTextSplitter(
-    chunk_size=1000,
-    chunk_overlap=100
-)
-chunks = text_splitter.split_documents(documents)
-st.info(f"Total chunks created: {len(chunks)}")
-
-# -------------------------------
-# Step 3: Create embeddings & FAISS index
-# -------------------------------
-with st.spinner("Creating embeddings..."):
-    embeddings = HuggingFaceEmbeddings(model_name="sentence-transformers/all-MiniLM-L6-v2")
-    vectorstore = FAISS.from_documents(chunks, embeddings)
-st.success("✅ Embeddings created and stored in FAISS!")
-
-# -------------------------------
-# Step 4: Load LLM
-# -------------------------------
-with st.spinner("Loading language model..."):
-    llm = pipeline(
-        "text2text-generation",
-        model="google/flan-t5-large",
-        device=-1
+@st.cache_resource
+def build_qa_chain(pdf_text):
+    # Split text
+    splitter = RecursiveCharacterTextSplitter(
+        chunk_size=1000,
+        chunk_overlap=200
     )
-st.success("✅ LLM loaded successfully!")
+    chunks = splitter.split_text(pdf_text)
 
-# -------------------------------
-# Step 5: Ask question
-# -------------------------------
-query = st.text_input("Ask a question from the PDF:")
+    # Embeddings
+    embeddings = HuggingFaceEmbeddings(
+        model_name="sentence-transformers/all-MiniLM-L6-v2"
+    )
 
-if query:
-    # -------------------------------
-    # Step 6: Semantic search
-    # -------------------------------
-    docs_with_scores = vectorstore.similarity_search_with_score(query, k=5)
-    THRESHOLD = 0.9  # High threshold: only pick very relevant chunks
-    relevant_docs = [doc for doc, score in docs_with_scores if score < THRESHOLD]
+    # Vector DB
+    vectorstore = FAISS.from_texts(chunks, embeddings)
 
-    if not relevant_docs:
-        st.warning("❌ Answer not found in the PDF.")
+    # LLM
+    hf_pipeline = pipeline(
+        "text2text-generation",
+        model="google/flan-t5-base",
+        max_length=256
+    )
+
+    llm = HuggingFacePipeline(pipeline=hf_pipeline)
+
+    # QA Chain
+    qa_chain = RetrievalQA.from_chain_type(
+        llm=llm,
+        retriever=vectorstore.as_retriever(search_kwargs={"k": 4}),
+        return_source_documents=True
+    )
+
+    return qa_chain
+
+
+# ------------------ Main Logic ------------------
+if uploaded_file:
+    with st.spinner("Reading PDF..."):
+        pdf_text = load_pdf_text(uploaded_file)
+
+    if len(pdf_text.strip()) == 0:
+        st.error("❌ Could not extract text from this PDF.")
     else:
-        context = "\n".join([doc.page_content for doc in relevant_docs])
+        qa_chain = build_qa_chain(pdf_text)
+        st.success("✅ PDF loaded successfully!")
 
-        # -------------------------------
-        # Step 7: Generate answer
-        # -------------------------------
-        prompt = f"""
-Answer the question using ONLY the context below.
-If the answer is not present in the context, say 'Answer not found'.
+        question = st.text_input("Ask your question:")
 
-Context:
-{context}
+        if question:
+            with st.spinner("Searching document..."):
+                result = qa_chain(question)
 
-Question:
-{query}
+            answer = result["result"].strip()
 
-Answer in detail, at least 10 lines:
-"""
-        with st.spinner("Generating answer..."):
-            output = llm(prompt, max_length=1000, do_sample=True)
-            answer = output[0]["generated_text"]
-
-        st.subheader("Answer:")
-        st.write(answer)
+            # Strict NOT FOUND logic
+            if (
+                len(answer) < 15
+                or "not found" in answer.lower()
+                or "no information" in answer.lower()
+            ):
+                st.warning("❌ Answer not found in the document.")
+            else:
+                st.subheader("📌 Answer (max 10 lines)")
+                lines = answer.split("\n")[:10]
+                st.write("\n".join(lines))
