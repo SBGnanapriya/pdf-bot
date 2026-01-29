@@ -1,5 +1,5 @@
 import streamlit as st
-import PyPDF2
+from pypdf import PdfReader
 import torch
 from transformers import AutoTokenizer, AutoModelForSeq2SeqLM
 
