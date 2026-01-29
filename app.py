@@ -1,108 +1,85 @@
 import streamlit as st
-import tempfile
-import torch
-
 from langchain_community.document_loaders import PyPDFLoader
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_community.embeddings import HuggingFaceEmbeddings
 from langchain_community.vectorstores import FAISS
+from transformers import pipeline
 
-from transformers import AutoTokenizer, AutoModelForSeq2SeqLM
+# -----------------------------
+# STREAMLIT UI
+# -----------------------------
+st.set_page_config(page_title="PDF QA Bot", layout="centered")
+st.title("📄 PDF Question Answering Bot")
+st.write("Upload a PDF and ask any question. The bot will read the PDF and answer intelligently.")
 
+# -----------------------------
+# UPLOAD PDF
+# -----------------------------
+uploaded_file = st.file_uploader("Upload your PDF", type=["pdf"])
 
-# ----------------------------
-# Page config
-# ----------------------------
-st.set_page_config(page_title="PDF QA Bot", layout="wide")
-st.title("📄 PDF Question Answering Bot (Open-Source LLM)")
+if uploaded_file is not None:
 
-
-# ----------------------------
-# Load models
-# ----------------------------
-@st.cache_resource
-def load_models():
-    embedder = HuggingFaceEmbeddings(
-        model_name="sentence-transformers/all-MiniLM-L6-v2"
-    )
-
-    tokenizer = AutoTokenizer.from_pretrained("google/flan-t5-base")
-    model = AutoModelForSeq2SeqLM.from_pretrained("google/flan-t5-base")
-
-    return embedder, tokenizer, model
-
-
-embedder, tokenizer, model = load_models()
-
-
-# ----------------------------
-# Upload PDF
-# ----------------------------
-uploaded_file = st.file_uploader("Upload a PDF", type="pdf")
-
-if uploaded_file:
-    with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
-        tmp.write(uploaded_file.read())
-        pdf_path = tmp.name
-
-    loader = PyPDFLoader(pdf_path)
+    # Load PDF
+    loader = PyPDFLoader(uploaded_file)
     documents = loader.load()
+    st.success(f"PDF loaded successfully! Total pages: {len(documents)}")
 
-    st.success(f"PDF loaded successfully ({len(documents)} pages)")
-
-
-    # ----------------------------
-    # Split PDF
-    # ----------------------------
-    splitter = RecursiveCharacterTextSplitter(
-        chunk_size=800,
-        chunk_overlap=100
+    # Split PDF into chunks
+    text_splitter = RecursiveCharacterTextSplitter(
+        chunk_size=500,
+        chunk_overlap=50
     )
-    chunks = splitter.split_documents(documents)
+    chunks = text_splitter.split_documents(documents)
+    st.info(f"PDF split into {len(chunks)} chunks for semantic search.")
 
-    vectorstore = FAISS.from_documents(chunks, embedder)
-    st.success("Vector store created!")
+    # -----------------------------
+    # EMBEDDINGS + VECTORSTORE
+    # -----------------------------
+    embeddings = HuggingFaceEmbeddings(model_name="sentence-transformers/all-MiniLM-L6-v2")
+    vectorstore = FAISS.from_documents(chunks, embeddings)
+    st.success("Embeddings created and vector store is ready!")
 
+    # -----------------------------
+    # LOAD OPEN-SOURCE LLM
+    # -----------------------------
+    @st.cache_resource
+    def load_llm():
+        return pipeline(
+            "text2text-generation",
+            model="google/flan-t5-base",
+            device=0  # Use -1 for CPU
+        )
 
-    # ----------------------------
-    # Question
-    # ----------------------------
-    query = st.text_input("Ask a question (e.g. overview, explain inheritance, what is object)")
+    llm = load_llm()
 
-    if query:
-        # Always retrieve top chunks
-        docs = vectorstore.similarity_search(query, k=5)
+    # -----------------------------
+    # USER QUESTION
+    # -----------------------------
+    question = st.text_input("Ask your question:")
 
-        context = "\n\n".join(doc.page_content for doc in docs)
+    if st.button("Get Answer") and question.strip() != "":
+        # Semantic search
+        docs_with_scores = vectorstore.similarity_search_with_score(question, k=3)
+        THRESHOLD = 1.0  # similarity threshold
+        relevant_docs = [doc for doc, score in docs_with_scores if score < THRESHOLD]
 
-        prompt = f"""
-You are a helpful assistant answering questions ONLY from the given context.
+        if not relevant_docs:
+            st.error("❌ Answer not found in the PDF.")
+        else:
+            # Combine chunks
+            context = "\n".join([doc.page_content for doc in relevant_docs])
 
-Rules:
-- If the question asks for an overview or summary, summarize the document.
-- If the answer is not present in the context, say exactly: "Answer not found in the document."
-- Explain clearly in 10–12 lines.
-- Do NOT add outside knowledge.
+            # Generate answer using LLM
+            prompt = f"""
+Answer the following question based ONLY on the context below.
+If the answer is not in the context, say "Answer not found".
 
 Context:
 {context}
 
 Question:
-{query}
-
-Answer:
+{question}
 """
 
-        inputs = tokenizer(prompt, return_tensors="pt", truncation=True)
-
-        with torch.no_grad():
-            outputs = model.generate(
-                **inputs,
-                max_new_tokens=350,
-                temperature=0.3
-            )
-
-        answer = tokenizer.decode(outputs[0], skip_special_tokens=True)
-
-        st.subheader("✅ Answer")
-        st.write(answer)
+            answer = llm(prompt, max_length=500)[0]["generated_text"]
+            st.success(answer)
