@@ -12,10 +12,18 @@ st.title("📄 PDF Q&A Bot with Hugging Face LLM")
 # -----------------------------
 # Step 1: Upload PDF
 # -----------------------------
+import tempfile
+
 uploaded_file = st.file_uploader("Upload a PDF file", type="pdf")
 if uploaded_file is not None:
     try:
-        loader = PyPDFLoader(uploaded_file)
+        # Save uploaded file to a temporary location
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp_file:
+            tmp_file.write(uploaded_file.read())
+            tmp_pdf_path = tmp_file.name
+
+        # Now load PDF from temporary path
+        loader = PyPDFLoader(tmp_pdf_path)
         documents = loader.load()
         st.success(f"✅ PDF loaded successfully! Total pages: {len(documents)}")
     except Exception as e:
