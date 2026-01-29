@@ -1,8 +1,5 @@
 streamlit
-langchain
-langchain-community
-faiss-cpu
-sentence-transformers
+PyPDF2
 transformers
 torch
-pypdf
+sentencepiece
