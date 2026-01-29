@@ -1,34 +1,39 @@
 import streamlit as st
 from pypdf import PdfReader
-from transformers import pipeline
+from transformers import AutoTokenizer, AutoModelForSeq2SeqLM, pipeline
 from sentence_transformers import SentenceTransformer, util
 import torch
 
-# -------------------------------
+# ---------------------------------
 # PAGE CONFIG
-# -------------------------------
+# ---------------------------------
 st.set_page_config(page_title="PDF Q&A Bot", layout="wide")
 st.title("📄 PDF Question Answering Bot (Open Source LLM)")
 
-# -------------------------------
-# LOAD MODELS (Cached)
-# -------------------------------
+# ---------------------------------
+# LOAD MODELS (CACHED)
+# ---------------------------------
 @st.cache_resource
 def load_models():
     embedder = SentenceTransformer("all-MiniLM-L6-v2")
 
+    tokenizer = AutoTokenizer.from_pretrained("google/flan-t5-base")
+    model = AutoModelForSeq2SeqLM.from_pretrained("google/flan-t5-base")
+
     llm = pipeline(
-        "text2text-generation",
-        model="google/flan-t5-base",
+        task="text2text-generation",
+        model=model,
+        tokenizer=tokenizer,
         max_length=512
     )
+
     return embedder, llm
 
 embedder, llm = load_models()
 
-# -------------------------------
+# ---------------------------------
 # PDF TEXT EXTRACTION
-# -------------------------------
+# ---------------------------------
 def extract_text_from_pdf(uploaded_file):
     reader = PdfReader(uploaded_file)
     text = ""
@@ -37,36 +42,35 @@ def extract_text_from_pdf(uploaded_file):
             text += page.extract_text() + "\n"
     return text
 
-# -------------------------------
+# ---------------------------------
 # TEXT CHUNKING
-# -------------------------------
+# ---------------------------------
 def chunk_text(text, chunk_size=400):
     words = text.split()
-    chunks = []
-    for i in range(0, len(words), chunk_size):
-        chunk = " ".join(words[i:i + chunk_size])
-        chunks.append(chunk)
-    return chunks
+    return [
+        " ".join(words[i:i + chunk_size])
+        for i in range(0, len(words), chunk_size)
+    ]
 
-# -------------------------------
-# FIND MOST RELEVANT CHUNK
-# -------------------------------
+# ---------------------------------
+# SEMANTIC SEARCH
+# ---------------------------------
 def get_best_chunk(question, chunks):
-    question_embedding = embedder.encode(question, convert_to_tensor=True)
-    chunk_embeddings = embedder.encode(chunks, convert_to_tensor=True)
+    q_emb = embedder.encode(question, convert_to_tensor=True)
+    c_embs = embedder.encode(chunks, convert_to_tensor=True)
 
-    similarities = util.cos_sim(question_embedding, chunk_embeddings)[0]
-    best_idx = torch.argmax(similarities).item()
+    scores = util.cos_sim(q_emb, c_embs)[0]
+    best_idx = torch.argmax(scores).item()
 
-    return chunks[best_idx], similarities[best_idx].item()
+    return chunks[best_idx], scores[best_idx].item()
 
-# -------------------------------
-# GENERATE ANSWER
-# -------------------------------
+# ---------------------------------
+# LLM ANSWER
+# ---------------------------------
 def generate_answer(context, question):
     prompt = f"""
-You are a helpful teacher.
-Answer the question clearly and in detail (at least 10 lines).
+You are a knowledgeable teacher.
+Answer in at least 10 lines using simple explanations.
 
 Context:
 {context}
@@ -76,12 +80,11 @@ Question:
 
 Answer:
 """
-    response = llm(prompt)[0]["generated_text"]
-    return response
+    return llm(prompt)[0]["generated_text"]
 
-# -------------------------------
+# ---------------------------------
 # UI
-# -------------------------------
+# ---------------------------------
 uploaded_file = st.file_uploader("Upload a PDF", type="pdf")
 
 if uploaded_file:
@@ -96,8 +99,8 @@ if uploaded_file:
         best_chunk, score = get_best_chunk(question, chunks)
 
         if score < 0.25:
-            st.warning("Answer not directly found in PDF. Giving a general explanation.")
-            context = text[:1500]  # fallback: general overview
+            st.warning("Exact answer not found. Giving a general explanation.")
+            context = text[:1500]
         else:
             context = best_chunk
 
@@ -106,5 +109,5 @@ if uploaded_file:
         st.subheader("📘 Answer")
         st.write(answer)
 
-        with st.expander("🔍 Used Context"):
+        with st.expander("🔍 Retrieved Context"):
             st.write(context)
