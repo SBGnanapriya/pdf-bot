@@ -1,127 +1,126 @@
 import streamlit as st
-from pypdf import PdfReader
-from sentence_transformers import SentenceTransformer, util
-from transformers import AutoTokenizer, AutoModelForSeq2SeqLM
-import torch
+import tempfile
 
-# ---------------------------------
-# PAGE CONFIG
-# ---------------------------------
-st.set_page_config(page_title="PDF Q&A Bot", layout="wide")
-st.title("📄 PDF Question Answering Bot (Open-Source LLM)")
+from langchain_community.document_loaders import PyPDFLoader
+from langchain_text_splitters import RecursiveCharacterTextSplitter
+from langchain_community.embeddings import HuggingFaceEmbeddings
+from langchain_community.vectorstores import FAISS
 
-# ---------------------------------
-# LOAD MODELS (CACHED)
-# ---------------------------------
+from transformers import pipeline
+
+
+# ----------------------------
+# Streamlit page config
+# ----------------------------
+st.set_page_config(page_title="PDF Question Answering Bot", layout="wide")
+st.title("📄 PDF Question Answering Bot (NLP + LLM)")
+
+
+# ----------------------------
+# Load models (cached)
+# ----------------------------
 @st.cache_resource
 def load_models():
-    embedder = SentenceTransformer("all-MiniLM-L6-v2")
+    embedder = HuggingFaceEmbeddings(
+        model_name="sentence-transformers/all-MiniLM-L6-v2"
+    )
 
-    tokenizer = AutoTokenizer.from_pretrained("google/flan-t5-base")
-    model = AutoModelForSeq2SeqLM.from_pretrained("google/flan-t5-base")
+    llm = pipeline(
+        task="text2text-generation",
+        model="google/flan-t5-base"
+    )
 
-    return embedder, tokenizer, model
+    return embedder, llm
 
-embedder, tokenizer, model = load_models()
 
-# ---------------------------------
-# PDF TEXT EXTRACTION
-# ---------------------------------
-def extract_text(pdf_file):
-    reader = PdfReader(pdf_file)
-    text = ""
-    for page in reader.pages:
-        if page.extract_text():
-            text += page.extract_text() + "\n"
-    return text
+embedder, llm = load_models()
 
-# ---------------------------------
-# TEXT CHUNKING
-# ---------------------------------
-def chunk_text(text, chunk_size=350):
-    words = text.split()
-    return [
-        " ".join(words[i:i + chunk_size])
-        for i in range(0, len(words), chunk_size)
-    ]
 
-# ---------------------------------
-# SEMANTIC SEARCH
-# ---------------------------------
-def find_context(question, chunks):
-    q_emb = embedder.encode(question, convert_to_tensor=True)
-    c_embs = embedder.encode(chunks, convert_to_tensor=True)
+# ----------------------------
+# File upload
+# ----------------------------
+uploaded_file = st.file_uploader("Upload a PDF file", type="pdf")
 
-    scores = util.cos_sim(q_emb, c_embs)[0]
-    best_idx = torch.argmax(scores).item()
-    best_score = scores[best_idx].item()
+if uploaded_file:
+    with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
+        tmp.write(uploaded_file.read())
+        pdf_path = tmp.name
 
-    return chunks[best_idx], best_score
+    # Load PDF
+    loader = PyPDFLoader(pdf_path)
+    documents = loader.load()
 
-# ---------------------------------
-# LLM ANSWER (NO PIPELINE)
-# ---------------------------------
-def generate_answer(context, question):
-    prompt = f"""
-You are a knowledgeable teacher.
+    st.success(f"PDF loaded successfully! Pages: {len(documents)}")
 
-Answer the question in a detailed and explanatory manner.
-Write at least 10–12 lines.
-Use full sentences and examples if possible.
+    # ----------------------------
+    # Split text
+    # ----------------------------
+    splitter = RecursiveCharacterTextSplitter(
+        chunk_size=500,
+        chunk_overlap=50
+    )
+    chunks = splitter.split_documents(documents)
+
+    # ----------------------------
+    # Create vector store
+    # ----------------------------
+    vectorstore = FAISS.from_documents(chunks, embedder)
+
+    st.success("Embeddings created successfully!")
+
+    # ----------------------------
+    # Ask question
+    # ----------------------------
+    query = st.text_input("Ask a question from the PDF:")
+
+    if query:
+        # Retrieve similar chunks
+        docs_with_scores = vectorstore.similarity_search_with_score(query, k=5)
+
+        THRESHOLD = 0.6
+        query_keywords = set(query.lower().split())
+        relevant_docs = []
+
+        for doc, score in docs_with_scores:
+            content = doc.page_content.lower()
+            keyword_overlap = query_keywords.intersection(content.split())
+
+            if score < THRESHOLD and len(keyword_overlap) >= 1:
+                relevant_docs.append(doc)
+
+        # ----------------------------
+        # Answer logic
+        # ----------------------------
+        if not relevant_docs:
+            st.error("❌ Answer not found in the PDF.")
+        else:
+            context = "\n".join(doc.page_content for doc in relevant_docs)
+
+            # Safety check to prevent hallucination
+            if len(context.strip()) < 200:
+                st.warning("⚠️ Context is too weak to generate a reliable answer.")
+            else:
+                prompt = f"""
+You are a helpful academic assistant.
+
+Answer the question using ONLY the context below.
+Explain clearly in at least 8–12 lines.
+If the answer is not present in the context, say "Answer not found".
 
 Context:
 {context}
 
 Question:
-{question}
+{query}
 
-Detailed Answer:
+Answer:
 """
 
-    inputs = tokenizer(
-        prompt,
-        return_tensors="pt",
-        truncation=True,
-        max_length=512
-    )
+                response = llm(
+                    prompt,
+                    max_new_tokens=300,
+                    do_sample=False
+                )
 
-    outputs = model.generate(
-        **inputs,
-        max_length=512,
-        min_length=150,        # 🔑 forces length
-        do_sample=True,        # 🔑 enables creativity
-        temperature=0.8,
-        top_p=0.9,
-        repetition_penalty=1.2
-    )
-
-    return tokenizer.decode(outputs[0], skip_special_tokens=True)
-
-# ---------------------------------
-# UI
-# ---------------------------------
-pdf = st.file_uploader("Upload a PDF", type="pdf")
-
-if pdf:
-    text = extract_text(pdf)
-    chunks = chunk_text(text)
-
-    st.success("PDF processed successfully!")
-
-    question = st.text_input("Ask a question")
-
-    if question:
-        context, score = find_context(question, chunks)
-
-        # If question is general (overview, summary, etc.)
-        if score < 0.25:
-            st.info("General question detected. Using broader context.")
-            context = text[:1500]
-
-        answer = generate_answer(context, question)
-
-        st.subheader("📘 Answer")
-        st.write(answer)
-
-        with st.expander("🔍 Context used"):
-            st.write(context)
+                st.subheader("✅ Answer")
+                st.write(response[0]["generated_text"])
