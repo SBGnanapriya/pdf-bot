@@ -1,14 +1,14 @@
 import streamlit as st
 from pypdf import PdfReader
-from transformers import AutoTokenizer, AutoModelForSeq2SeqLM, pipeline
 from sentence_transformers import SentenceTransformer, util
+from transformers import AutoTokenizer, AutoModelForSeq2SeqLM
 import torch
 
 # ---------------------------------
 # PAGE CONFIG
 # ---------------------------------
 st.set_page_config(page_title="PDF Q&A Bot", layout="wide")
-st.title("📄 PDF Question Answering Bot (Open Source LLM)")
+st.title("📄 PDF Question Answering Bot (Open-Source LLM)")
 
 # ---------------------------------
 # LOAD MODELS (CACHED)
@@ -20,22 +20,15 @@ def load_models():
     tokenizer = AutoTokenizer.from_pretrained("google/flan-t5-base")
     model = AutoModelForSeq2SeqLM.from_pretrained("google/flan-t5-base")
 
-    llm = pipeline(
-        task="text2text-generation",
-        model=model,
-        tokenizer=tokenizer,
-        max_length=512
-    )
+    return embedder, tokenizer, model
 
-    return embedder, llm
-
-embedder, llm = load_models()
+embedder, tokenizer, model = load_models()
 
 # ---------------------------------
 # PDF TEXT EXTRACTION
 # ---------------------------------
-def extract_text_from_pdf(uploaded_file):
-    reader = PdfReader(uploaded_file)
+def extract_text(pdf_file):
+    reader = PdfReader(pdf_file)
     text = ""
     for page in reader.pages:
         if page.extract_text():
@@ -45,7 +38,7 @@ def extract_text_from_pdf(uploaded_file):
 # ---------------------------------
 # TEXT CHUNKING
 # ---------------------------------
-def chunk_text(text, chunk_size=400):
+def chunk_text(text, chunk_size=350):
     words = text.split()
     return [
         " ".join(words[i:i + chunk_size])
@@ -55,22 +48,23 @@ def chunk_text(text, chunk_size=400):
 # ---------------------------------
 # SEMANTIC SEARCH
 # ---------------------------------
-def get_best_chunk(question, chunks):
+def find_context(question, chunks):
     q_emb = embedder.encode(question, convert_to_tensor=True)
     c_embs = embedder.encode(chunks, convert_to_tensor=True)
 
     scores = util.cos_sim(q_emb, c_embs)[0]
     best_idx = torch.argmax(scores).item()
+    best_score = scores[best_idx].item()
 
-    return chunks[best_idx], scores[best_idx].item()
+    return chunks[best_idx], best_score
 
 # ---------------------------------
-# LLM ANSWER
+# LLM ANSWER (NO PIPELINE)
 # ---------------------------------
 def generate_answer(context, question):
     prompt = f"""
-You are a knowledgeable teacher.
-Answer in at least 10 lines using simple explanations.
+You are an expert teacher.
+Explain clearly in at least 10 lines.
 
 Context:
 {context}
@@ -80,34 +74,41 @@ Question:
 
 Answer:
 """
-    return llm(prompt)[0]["generated_text"]
+
+    inputs = tokenizer(prompt, return_tensors="pt", truncation=True)
+    outputs = model.generate(
+        **inputs,
+        max_length=512,
+        temperature=0.7
+    )
+
+    return tokenizer.decode(outputs[0], skip_special_tokens=True)
 
 # ---------------------------------
 # UI
 # ---------------------------------
-uploaded_file = st.file_uploader("Upload a PDF", type="pdf")
+pdf = st.file_uploader("Upload a PDF", type="pdf")
 
-if uploaded_file:
-    text = extract_text_from_pdf(uploaded_file)
+if pdf:
+    text = extract_text(pdf)
     chunks = chunk_text(text)
 
     st.success("PDF processed successfully!")
 
-    question = st.text_input("Ask a question from the PDF")
+    question = st.text_input("Ask a question")
 
     if question:
-        best_chunk, score = get_best_chunk(question, chunks)
+        context, score = find_context(question, chunks)
 
+        # If question is general (overview, summary, etc.)
         if score < 0.25:
-            st.warning("Exact answer not found. Giving a general explanation.")
+            st.info("General question detected. Using broader context.")
             context = text[:1500]
-        else:
-            context = best_chunk
 
         answer = generate_answer(context, question)
 
         st.subheader("📘 Answer")
         st.write(answer)
 
-        with st.expander("🔍 Retrieved Context"):
+        with st.expander("🔍 Context used"):
             st.write(context)
