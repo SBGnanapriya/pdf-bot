@@ -1,28 +1,28 @@
+# app.py
 import streamlit as st
+import tempfile
 from langchain_community.document_loaders import PyPDFLoader
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_community.embeddings import HuggingFaceEmbeddings
 from langchain_community.vectorstores import FAISS
 from transformers import pipeline
 
-# -----------------------------
-# STREAMLIT UI
-# -----------------------------
-st.set_page_config(page_title="PDF QA Bot", layout="centered")
-st.title("📄 PDF Question Answering Bot")
-st.write("Upload a PDF and ask any question. The bot will read the PDF and answer intelligently.")
+st.set_page_config(page_title="PDF Q&A Bot", layout="wide")
+st.title("📄 PDF Q&A Bot with LLM")
 
-# -----------------------------
-# UPLOAD PDF
-# -----------------------------
+# 1️⃣ Upload PDF
 uploaded_file = st.file_uploader("Upload your PDF", type=["pdf"])
-
 if uploaded_file is not None:
 
+    # Save PDF to a temporary file
+    with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp_file:
+        tmp_file.write(uploaded_file.read())
+        pdf_path = tmp_file.name
+
     # Load PDF
-    loader = PyPDFLoader(uploaded_file)
+    loader = PyPDFLoader(pdf_path)
     documents = loader.load()
-    st.success(f"PDF loaded successfully! Total pages: {len(documents)}")
+    st.success(f"✅ PDF loaded successfully! Total pages: {len(documents)}")
 
     # Split PDF into chunks
     text_splitter = RecursiveCharacterTextSplitter(
@@ -30,56 +30,52 @@ if uploaded_file is not None:
         chunk_overlap=50
     )
     chunks = text_splitter.split_documents(documents)
-    st.info(f"PDF split into {len(chunks)} chunks for semantic search.")
+    st.info(f"Total chunks created: {len(chunks)}")
 
-    # -----------------------------
-    # EMBEDDINGS + VECTORSTORE
-    # -----------------------------
+    # Create embeddings
     embeddings = HuggingFaceEmbeddings(model_name="sentence-transformers/all-MiniLM-L6-v2")
     vectorstore = FAISS.from_documents(chunks, embeddings)
-    st.success("Embeddings created and vector store is ready!")
+    st.success("✅ FAISS vectorstore created with embeddings!")
 
-    # -----------------------------
-    # LOAD OPEN-SOURCE LLM
-    # -----------------------------
-    @st.cache_resource
-    def load_llm():
-        return pipeline(
-            "text2text-generation",
-            model="google/flan-t5-base",
-            device=0  # Use -1 for CPU
-        )
+    # Ask question
+    query = st.text_input("Ask a question about your PDF:")
 
-    llm = load_llm()
-
-    # -----------------------------
-    # USER QUESTION
-    # -----------------------------
-    question = st.text_input("Ask your question:")
-
-    if st.button("Get Answer") and question.strip() != "":
-        # Semantic search
-        docs_with_scores = vectorstore.similarity_search_with_score(question, k=3)
-        THRESHOLD = 1.0  # similarity threshold
+    if query:
+        # Search for relevant chunks
+        docs_with_scores = vectorstore.similarity_search_with_score(query, k=5)
+        THRESHOLD = 0.7  # strict similarity
         relevant_docs = [doc for doc, score in docs_with_scores if score < THRESHOLD]
 
         if not relevant_docs:
-            st.error("❌ Answer not found in the PDF.")
+            st.warning("❌ Answer not found in the PDF.")
         else:
-            # Combine chunks
+            # Combine chunks into context
             context = "\n".join([doc.page_content for doc in relevant_docs])
+            st.subheader("Retrieved context from PDF:")
+            st.write(context)
 
-            # Generate answer using LLM
+            # Load LLM (Hugging Face)
+            llm = pipeline(
+                task="text2text-generation",
+                model="google/flan-t5-large",  # larger for better answers
+                device=0  # use GPU if available
+            )
+
+            # Generate answer using context
             prompt = f"""
-Answer the following question based ONLY on the context below.
-If the answer is not in the context, say "Answer not found".
+Answer the question using ONLY the context below.
+If the answer is not present, say "Answer not found".
 
 Context:
 {context}
 
 Question:
-{question}
+{query}
 """
+            response = llm(prompt, max_length=512, do_sample=True, top_p=0.9, temperature=0.7)
+            answer = response[0]["generated_text"]
 
-            answer = llm(prompt, max_length=500)[0]["generated_text"]
+            st.subheader("📌 Final Answer:")
+            st.write(answer)
+
             st.success(answer)
